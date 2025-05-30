@@ -1,0 +1,324 @@
+---
+title: "Survival and Event History Analysis"
+author: 'c-r-loh'
+date: "2025-04-07"
+output: html_document
+---
+
+```{r, message = F, echo = F}
+library(tidyverse)
+dat = read.table("rhDNase.txt", header = T)
+library(survival)
+```
+
+Using only the data on time to first exacerbation, analyse the effectiveness of rhDNase in extending
+time to first pulmonary exacerbation.
+
+
+```{r}
+summary(survfit(Surv(time2, status) ~ 1, data = subset(dat, first == 1)))
+
+table(subset(dat, first == 1)$trt, subset(dat, first == 1)$status)
+
+sum(dat$first==1 & dat$status==1)
+##note
+##too low a number of variables for lasso, stepwise 
+
+
+```
+
+```{r}
+#new variables
+dat$fev_avg = (dat$fev + dat$fev2)/2
+dat = dat %>%
+  mutate(severity = cut(
+    fev_avg,
+    breaks = c(-Inf, 30, 49, 79, Inf),
+    labels = c("very severe", "severe", "moderate", "mild"),
+    right = T
+  )) %>%
+  mutate(severity = factor(severity, levels = c("mild", "moderate", "severe", "very severe")))
+
+dat$severity_code = as.numeric(dat$severity)
+```
+
+```{r, KM&LOGRANK&LOG-LOG}
+summary(dat)
+
+mod1 = survfit(Surv(time2, status)~ trt, data = dat, subset=which(first==1))
+
+#pdf("KM_by_trt.pdf")
+plot(mod1, col = 1:2, lty=1, lwd = 2, mark.time = T, xlab = "Time (days)", ylab = "Survival")
+legend("bottomleft", legend = c("Placebo", "rhDNase"), col = 1:2, lty=1, lwd = 2, bty = "n")
+#dev.off
+#intial plot above shows higher survival rates when on rhDNase
+
+mod1.1 = survfit(Surv(time2, status)~severity, data = dat, subset=which(first==1))
+#pdf("KM_by_sev.pdf")  
+plot(
+  mod1.1,
+  col = 1:4,          
+  lty = 1,
+  lwd = 2,
+  mark.time = TRUE,
+  xlab = "Time (days)",
+  ylab = "S(t)"
+)
+
+legend(
+  "bottomleft",
+  legend = levels(dat$severity),
+  col = 1:4,
+  lty = 1,
+  lwd = 2,
+  bty = "n",
+  title = "Severity"
+)
+#dev.off
+#both show results as expected, higher surv rates on treatment than placebo, and higher severity of weaker lung function having lower survi rates; the more severe the quicker the first exacerbation
+
+
+dat1 = dat %>%
+  filter(first==1)
+
+##
+survdiff(Surv(time2, status)~trt, data = dat1)
+#h0: S_placebo(t) = S_rhdnase(t) for all t, ~ chi sq 1
+survdiff(Surv(time2, status)~severity, data = dat1)
+#h0: S_mild(t) = ... = S_very severe(t) ~ chi sq 3
+
+
+#both log-rank tests indicates significant difference in survival curves between groups
+
+plot(mod1, fun = "cloglog", col = 1:2, lty=1, lwd=2, xlab = "time (days)", ylab = "log(-log(S(t)))", main = "log(-log) S(t) by trt")
+legend(
+  "topleft",
+  legend = c("Placebo", "rhDNase"),
+  col = 1:2,
+  lty = 1,
+  lwd = 2,
+  bty = "n",
+  title = "Treatment"
+)
+#pdf("loglog_sev.pdf")
+plot(mod1.1, fun = "cloglog", col = 1:4, lty=1, lwd=2, xlab = "time (days)", ylab = "log(-log(S(t)))"
+     #, main = "log(-log) S(t) by severity"
+     ) 
+legend(
+  "topleft", 
+  legend = levels(dat1$severity), 
+  col = 1:4, 
+  lty = 1, 
+  lwd = 2,
+  bty = "n",
+  title = "Severity"
+)
+#dev.off()
+```
+
+```{r}
+#variable selection
+##checking if fev should be continuous or categorical
+
+mod_base = coxph(Surv(time2, status)~trt, dat1)
+resid_mart = residuals(mod_base, type = "martingale")
+plot(dat1$fev_avg, resid_mart, xlab = "Average FEV", ylab = "Residuals")
+lines(smooth.spline(dat1$fev_avg, resid_mart), col ="red")
+
+#trend is smooth and generally monotonic, no visual evidence of strongly nonlinear patterns.
+event_times = dat1$time2[dat1$status == 1]
+
+sum(duplicated(event_times))
+#119 ties found
+
+mod_full = coxph(Surv(time2, status)~trt+fev_avg,dat1, ties = "efron")
+#lrt
+anova(mod_base, mod_full)
+#test int
+
+mod_full_int = coxph(Surv(time2, status) ~ trt * fev_avg, dat1, ties = "efron")
+AIC(mod_full, mod_full_int)
+#schoenfeld for ph assumption
+cox.zph(mod_full)
+#all >0.05, h0: hazards proportional; constant over time h1: not constant over time
+#-> log(-log) plot to confirm
+
+plot(mod1, fun = "cloglog",conf.int=FALSE , col=c("darkblue","darkred"), lty= c(1,2), lwd=2, xlab="log(t)", ylab = "log(-log(S(t)))", main = "log(-log) Survival by trt")
+legend("bottomleft", legend = c("placebo", "rhDNase"), col=c("darkblue","darkred"), lty=c(1,2), lwd=2, bty = "n")
+
+#pdf("schoenfeldresid1.pdf")
+#par(mfrow=c(1,1))
+plot(cox.zph(mod_full)[1], col = 2)
+#dev.off()
+
+#pdf("schoenfeldresid2.pdf")
+plot(cox.zph(mod_full)[2], col = 2)
+#dev.off()
+
+
+#fev decreases survival over time, smoothed line and CI differs from 0
+#both relatively linear
+#trt appears constant over time, should be time-invariant in the model
+
+```
+
+```{r}
+#baseline haz and s(t)
+base_hazdata = basehaz(mod_full, centered = T)
+surv_base = survfit(mod_full, newdata = data.frame(trt = 0, fev_avg = mean(dat1$fev_avg)))
+plot(surv_base, xlab = "t", ylab = "S(t)")
+
+#risk adjusted
+new_patient1 = data.frame(trt = 1, fev_avg = mean(dat1$fev_avg))
+new_patient2 = data.frame(trt = 0, fev_avg = mean(dat1$fev_avg))
+
+cox_trt = survfit(mod_full, newdata = new_patient1)
+cox_placebo = survfit(mod_full, newdata = new_patient2)
+
+#pdf("km_riskadj.pdf")
+plot(mod1, col = c("black", "firebrick"), lty = c(1,1), lwd = 1.5, xlab = "t", ylab = "S(t)", conf.int = F)
+lines(cox_placebo, col = "grey40", lty =2, lwd =2)
+lines(cox_trt, col = "firebrick3", lty =2, lwd=2)
+legend("bottomleft",
+       legend = c("KM Placebo", "KM rhDNase", "Cox PH Placebo", "Cox PH rhDNase"),
+       col = c("black", "firebrick", "grey40", "firebrick3"),
+       lty = c(1, 1, 2, 2),
+       lwd = 2,
+       bty = "n")
+#dev.off()
+```
+
+```{r}
+#try weibull and exponential
+#'baseline' KM for comparison
+km = survfit(Surv(time2, status)~1, dat1)
+
+
+#weibull
+#plot(km, fun = "cloglog", xlab = "log(t)", ylab = "log(-log(S(t)))", main = "Weibull Diag")
+
+aft_weib = survreg(Surv(time2, status) ~ trt + fev_avg, dat1, dist = "weibull")
+resid_weib = residuals(aft_weib, type = "response")
+flex_weib = flexsurv::flexsurvreg(Surv(time2, status) ~ trt + fev_avg, data = dat1, dist = "weibull")
+
+#expo
+#plot(km, fun = function(s) -log(s), xlab = "t", ylab="-log(S(t))", main = "Expon Diag")
+
+aft_exp = survreg(Surv(time2, status) ~ trt + fev_avg, dat1, dist = "exponential")
+AIC(aft_weib, aft_exp)
+flex_expo = flexsurv::flexsurvreg(Surv(time2, status) ~ trt + fev_avg, data = dat1, dist = "exponential")
+#comparable AIC, weibull chosen since it can support both PH and AFT interpretations; weibull greater modelling flexibility
+
+#visual
+t_vals = seq(1, max(dat1$time2), length.out = 200)
+new_mean = data.frame(trt = mean(dat1$trt), fev_avg = mean(dat1$fev_avg))
+lp_weib = predict(aft_weib, newdata = new_mean, type = "lp")
+lp_exp = predict(aft_exp, newdata = new_mean, type = "lp")
+scale_weib = aft_weib$scale; scale_exp = aft_exp$scale
+
+S_weib = exp(-(t_vals/exp(lp_weib))^(1/scale_weib))
+S_exp = exp(-t_vals/exp(lp_exp))
+
+plot(km, xlab = "t", ylab = "S(t)", main = "KM vs Weib Vs Expo")
+#lines(t_vals, S_weib, col ="red", lty = 2)
+#lines(t_vals, S_exp, col = "blue", lty = 3)
+lines(flex_weib, col = "red", lty = 2)
+lines(flex_expo, col = "blue", lty = 3)
+
+#weibull
+aft_coef = coef(aft_weib)
+aft_scale = aft_weib$scale
+
+ph_equiv = -aft_coef/aft_scale
+
+table1 = data.frame(
+  Covariate = names(aft_coef),
+  AFT_Coefficient = round(aft_coef, 5),
+  AFT_Time_Ratio = round(exp(aft_coef), 5),
+  PH_Equivalent_Beta = round(ph_equiv, 5),
+  PH_Equivalent_HR = round(exp(ph_equiv), 5)
+)
+
+mu = predict(aft_weib, newdata = data.frame(trt = 0, fev_avg = mean(dat1$fev_avg)), type = "lp")
+
+shape = 1/scale_weib
+scale = exp(mu)
+
+h0_t = (shape/scale) * (t_vals/scale)^(shape-1)
+plot(t_vals, h0_t, type = "l", col = "red", lwd = 2, xlab = "t", ylab ="baseline hazard", main = "Baseline hazard from Weibull AFT")
+#trt = 0 and avg fev_avg, increasing risk of event even in the absence of covariates
+#AIC
+AIC(aft_weib, aft_exp)
+#compare with nonparametric H0_t from cox (mod_full)
+cox_basehaz = basehaz(mod_full, centered = F)
+
+t_vals = cox_basehaz$time
+H0_weib = (t_vals/scale)^shape
+
+#pdf("cox_vs_weib_haz.pdf")
+plot(cox_basehaz$time, cox_basehaz$hazard, type = "s", lwd = 2, col = "darkblue", xlab = "t", ylab = "H0(t)"
+     #, main = "H0(t): Cox & Weib"
+)
+lines(t_vals, H0_weib, col = "red", lty = 1, lwd =2 )
+legend("topleft", legend = c("Cox PH", "Weibull-AFT"), col = c("darkblue", "red"), lty= c(1,1), lwd = 2, bty = "n")
+#dev.off()
+#p slightly more than 1 weib aft supports cox ph in terms of direction and structure, but the parametric form does not fully capture the early steepness of the empirical baseline hazard estimated by the Cox. cox estimates h0(t) flexibly from data; step-function. weib enforces a strict parametric form
+
+#shape implies a slightly increasing hazard, 1.0854 very close to 1, mild increase in hazard. but based on AIC the exponential model is an acceptable simplication -> constant hazard, cox model likely to hold
+
+#probabilities
+new_placebo = data.frame(trt = 0, fev_avg = mean(dat1$fev_avg)); new_trt = data.frame(trt = 1, fev_avg = mean(dat1$fev_avg))
+
+mu_placebo = predict(aft_weib, newdata = new_placebo, type = "lp");
+mu_trt = predict(aft_weib, newdata = new_trt, type = "lp")
+
+scale_placebo = exp(mu_placebo); scale_trt = exp(mu_trt)
+
+t = 100
+
+S100placebo = exp(-(t/scale_placebo)^shape); S100trt = exp(-(t/scale_trt)^shape)
+
+S100placebo; S100trt
+```
+
+```{r}
+plot(km, fun = "cloglog", log = "x", col = 1, lty = 1, main = "Weibull Diagnostic")
+
+#pdf("km_vs_aft.pdf")
+plot(km, xlab = "t", ylab = "S(t)"
+     #, main = "KM vs Weibull"
+     , col = rgb(0, 0, 0, 0.5))
+lines(seq(1, max(dat1$time2), length.out = 200), S_weib, col = "red", lty = 1)
+legend(
+  "bottomleft",
+  legend = c("Kaplan-Meier", "Weibull AFT"),
+  col = c(rgb(0, 0, 0, 0.5), "red"),
+  lty = c(1, 1),
+  lwd = c(2, 2),
+  bty = "n"
+)
+#dev.off()
+#hazard-scale fit differs, but survival interpretation remains valid
+```
+
+```{r}
+aft_beta <- coef(aft_weib)
+aft_scale <- aft_weib$scale
+ph_equiv_beta <- -aft_beta / aft_scale
+
+#combine with cox coefficients
+cox_beta <- coef(mod_full)
+
+#comparison table
+comparison <- data.frame(
+  Variable = names(cox_beta),
+  Cox_PH_Beta = round(cox_beta, 4),
+  Weibull_AFT_Beta = round(aft_beta[names(cox_beta)], 4),
+  Weibull_PH_Equiv_Beta = round(ph_equiv_beta[names(cox_beta)], 4),
+  Sign_Match = sign(cox_beta) == sign(ph_equiv_beta[names(cox_beta)]),
+  Order_Match = rank(-abs(cox_beta)) == rank(-abs(ph_equiv_beta[names(cox_beta)]))
+)
+print(comparison)
+
+cor(cox_beta, ph_equiv_beta[names(cox_beta)])
+```
