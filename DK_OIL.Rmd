@@ -9,7 +9,7 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-Libraries and filtering of dataset as specified in instructions:
+Dataset available from: https://statistics-awards.eu/competitions/7
 - Denmark
 - Gas oil and diesel oil
 - Gross inland deliveries - calculated
