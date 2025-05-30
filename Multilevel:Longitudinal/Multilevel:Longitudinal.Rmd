@@ -1,0 +1,307 @@
+---
+title: "MATH453 Coursework Final"
+author: '36775864'
+date: "2025-03-25"
+output: pdf_document
+---
+
+```{r, echo = F, message= F}
+library(lme4)
+library(tidyverse)
+library(nlme)
+load("Data1.RData")
+library(viridis)
+library(lmtest)
+library(reshape2)
+library(statmod)
+library(DHARMa)
+#library(lmerTest)
+load("Data2.RData")
+```
+
+## Problem 1
+- Count data
+- Overdispersed
+```{r}
+var(Data1$Score)/mean(Data1$Score)
+```
+
+
+```{r, Q1FITCHECKS}
+mod.nb = glmer.nb(Score ~ Age * Gender + (1 + Age|ReaserchGroupID), data = Data1)
+mod.nb1 = glmer.nb(Score ~ Age * Gender + (1|ReaserchGroupID), data = Data1)
+
+mod.bin = glmer(cbind(Score,(100-Data1$Score)) ~ Age * Gender + (1 + Age|ReaserchGroupID), family = "binomial", data = Data1)
+
+anova(mod.nb, mod.nb1)
+```
+
+```{r, Q1SIM}
+sim = simulate(mod.nb, nsim = 10000, seed = 11)
+#Score of Age 40-59 lower than 20-39
+old_rows = which(Data1$Age =="40-59")
+young_rows = which(Data1$Age == "20-39")
+
+sim_old  = sapply(sim, function(x) mean(x[old_rows]))
+sim_young = sapply(sim, function(x) mean(x[young_rows]))
+#require mean(x[.]) to reduce to one summary statistic per group per sim
+hist((sim_old-sim_young), density = TRUE)
+prob_q1 = mean(sim_old < sim_young)
+nb_means = c(mean(sim_old), mean(sim_young))
+
+theta = getME(mod.nb, "glmer.nb.theta")
+```
+
+```{r, Q1SIMVISUALCHECK}
+sim_mean = rowMeans(sim)
+df_combined_hist = data.frame(
+  value = c(Data1$Score, sim_mean),
+  source = rep(c("Observed", "Simulated"), c(length(Data1$Score), length(sim_mean)))
+)
+
+ggplot(df_combined_hist, aes(x =value, fill = source)) +
+  geom_histogram(aes(y = after_stat(density)), alpha = 0.5, position = "identity", bins = 5) +
+scale_fill_manual(values = c("Observed" = "black", "Simulated" = "skyblue")) +
+  theme_minimal() +
+  labs(x = "Value", y = "Count", title = "Histogram: Observed vs Simulated Mean")
+
+```
+
+
+
+
+
+##Problem 2
+-RID for problem 2 irrelevant
+```{r}
+
+pairs(Data2)
+
+ggplot(data=Data2,aes(y=logScore,x=time, group= PatientID )) +
+  geom_line()+
+  geom_point()+
+  facet_grid(. ~ Gender)
+
+hist(Data2$logScore, breaks = 10)
+```
+looks relatively linear
+TRY LINEAR
+
+Time fixed effect
+Random intercept per PatientID
+
+```{r, Q2COVARIATES}
+
+mod.lm1 = lmer(logScore ~ Age + Gender + time + (1 | PatientID) + (0 + time | PatientID), data = Data2)
+mod.lm2 = lmer(logScore ~ Age + Gender * time + (1 + time | PatientID), data = Data2)
+mod.lm3 = lmer(logScore ~ Age + Gender + time + (1 + time | PatientID), data = Data2)
+mod.lm4 = lmer(logScore ~ Age + Gender + Gender * time + (1 + time | PatientID), data = Data2)
+
+#comparing interaction terms
+
+
+AIC(mod.lm1, mod.lm2, mod.lm3, mod.lm4)
+
+```
+
+```{r}
+summary(mod.lm3)
+```
+-Quantify growth curve
+All else constant, the expected improvement of logScore improves by 0.015 log units per month.
+
+-P(logScore > log(90) | t = 18)
+That is, an patient with unspecified characteristics has a 34% chance of having logScore > log(90) 18 months post implementation.
+```{r, Q2SIM}
+sim_q2 = simulate(mod.lm3, nsim = 10000, seed = 11)
+t18_rows = which(Data2$time == 18)
+#t0_rows = which(Data2$time == 0)
+
+#sim_t0 = sapply(sim_q2, function(x) (x[t0_rows]))
+sim_t18  = sapply(sim_q2, function(x) (x[t18_rows]))
+prob_q2 = mean(sim_t18 > log(90))
+#prob_compare = mean(sim_t0 > log(90))
+
+prob_q2; #prob_compare
+```
+
+```{r}
+check1 = Data2 %>%
+  filter(time == 18, logScore > log(90))
+check2 = Data2 %>%
+  filter(time == 18)
+nrow(check1)/nrow(check2)
+```
+
+- Compare M/F growth curves
+No evidence that gender have different rates of change; they will have the same curve albeit different intercept as seen frmo mod.lm3.
+```{r, Q2ANOVA}
+#mod.lm3 = lmer(logScore ~ Age + Gender + time + (1 + time | PatientID), data = Data2)
+mod.lm3.1 = lmer(logScore ~ Age + Gender * time + (1 + time | PatientID), data = Data2)
+mod.lm3.2 = lmer(logScore ~ Age * Gender + time + (1 + time| PatientID), data = Data2)
+anova(mod.lm3, mod.lm3.1)
+anova(mod.lm3, mod.lm3.2)
+
+```
+
+```{r, Q2RESID}
+qqnorm(resid(mod.lm3), ylab = "Residuals", main = ""); qqline(resid(mod.lm3))
+
+plot(resid(mod.lm3),
+     ylab = "Residuals")
+```
+
+
+Prettied plots for report
+```{r}
+score_range = seq(0,100,1)
+size = 100
+mu = mean(Data1$Score)
+sigmasq = var(Data1$Score)
+r = (mu**2)/(sigmasq - mu)
+p = mu/sigmasq
+nb = dnbinom(seq(0,100,1), size = r, prob = p)
+nb_df = data.frame(seq(0,100,1), nb)
+bin = dbinom(seq(0,100,1), size = size, prob = mu/size)
+bin_df = data.frame(seq(0,100,1), bin)
+norm = dnorm(seq(0,100,1), mean = mu, sd = sqrt(sigmasq))
+norm_df = data.frame(seq(0,100,1), norm)
+
+#final plot
+ggplot(Data1, aes(x = Score)) +
+  geom_histogram(aes(y = after_stat(density)), breaks = seq(0,100, by=5), alpha = 0.5) +
+  geom_line(data = nb_df, aes(x = score_range, y = nb), color = "red", size = 1) +
+  geom_line(data = bin_df, aes(x = score_range, y = bin), color = "blue", size = 1, lty = 8) +
+  geom_line(data = norm_df, aes(x = score_range, y = norm), color = "purple", size = 1, lty = 8) +
+  theme_minimal()
+
+#prettied up
+q1plot = ggplot(Data1, aes(x = Score)) +
+  geom_histogram(
+    aes(y = after_stat(density), fill = "Observed Data"),
+    breaks = seq(0, 100, by = 5),
+    alpha = 0.5,
+    color = "black"
+  ) +
+  geom_line(
+    data = nb_df,
+    aes(
+      x = score_range,
+      y = nb,
+      color = "Negative Binomial",
+      linetype = "Negative Binomial"
+    ),
+    size = 1
+  ) +
+  geom_line(
+    data = bin_df,
+    aes(
+      x = score_range,
+      y = bin,
+      color = "Binomial",
+      linetype = "Binomial"
+    ),
+    size = 1
+  ) +
+  geom_line(
+    data = norm_df,
+    aes(
+      x = score_range,
+      y = norm,
+      color = "Gaussian",
+      linetype = "Gaussian"
+    ),
+    size = 1
+  ) +
+  
+  scale_fill_manual(name = NULL,
+                    values = c("Observed Data" = "grey80")) +
+  scale_color_manual(
+    name = NULL,
+    values = c(
+      "Negative Binomial" = "firebrick",
+      "Binomial" = "steelblue",
+      "Gaussian" = "darkorchid"
+    )
+  ) +
+  scale_linetype_manual(
+    name = NULL,
+    values = c(
+      "Negative Binomial" = "solid",
+      "Binomial" = "dotted",
+      "Gaussian" = "dotted"
+    )
+  ) +
+  ggtitle("Histogram of Score with theoretical PDFs") +
+theme_minimal(base_size = 14) + 
+theme(
+  legend.position = c(0.05, 0.95),
+  legend.justification = c(0, 1),
+  legend.background = element_blank(),
+  legend.key = element_blank(),
+  legend.text = element_text(size = 12),        
+  axis.title = element_text(size = 14, face = "bold"),  
+  axis.text = element_text(size = 12),           
+  plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  
+  panel.grid.major = element_line(color = "grey80", linewidth = 0.3), 
+  panel.grid.minor = element_blank()
+)
+q1plot
+
+
+mu2 = mean(Data2$logScore)
+sigmasq2 = var(Data2$logScore)
+norm2 = dnorm(seq(-11,17,1), mean = mu2, sd = sqrt(sigmasq2))
+norm_df2 = data.frame(seq(-11,17,1), norm2)
+
+ggplot(Data2, aes(x = logScore)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 breaks = seq(-11, 17, by = 1),
+                 alpha = 0.5) +
+  geom_line(
+    data = norm_df2,
+    aes(x = seq(-11, 17, 1), y = norm2),
+    color = "firebrick",
+    size = 1
+  )
+
+q2plot = ggplot(Data2, aes(x = logScore)) +
+  geom_histogram(
+    aes(y = after_stat(density), fill = "Observed Data"),
+    breaks = seq(-11, 17, by = 1),
+    alpha = 0.5,
+    color = "black"
+  ) +
+  geom_line(data = norm_df2,
+            aes(
+              x = seq(-11, 17, 1),
+              y = norm2,
+              color = "Gaussian PDF"
+            ),
+            size = 1) +
+  
+  scale_fill_manual(name = NULL, values = c("Observed Data" = "grey70")) +
+  scale_color_manual(name = NULL, values = c("Gaussian PDF" = "firebrick")) +
+  
+  ggtitle("Histogram of logScore with theoretical PDF") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position= c(0.05, 0.95),
+    legend.justification = c(0, 1),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 12),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    panel.grid.major = element_line(color = "grey80", linewidth = 0.3),
+    panel.grid.minor = element_blank()
+  ) +
+  guides(
+    fill = guide_legend(override.aes = list(fill = "grey60")),
+    color = guide_legend(override.aes = list(linewidth = 1.5))
+  )
+
+q1plot
+q2plot
+```
