@@ -1,2 +1,2 @@
 # lancs
-cw working
+rough rmds of packages and analyses done in modules taken
