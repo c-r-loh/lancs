@@ -1,0 +1,500 @@
+---
+title: "DK OIL"
+author: 'c-r-loh'
+date: "2025-02-03"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Libraries and filtering of dataset as specified in instructions:
+- Denmark
+- Gas oil and diesel oil
+- Gross inland deliveries - calculated
+- Thousand tons (default)
+90/10 Train/Test split
+```{r, echo = FALSE, message=FALSE}
+library(tidyverse)
+library(forecast)
+library(tseries)
+library(FinTS)
+data = read.csv("estat_nrg_cb_oilm_en.csv")
+```
+
+```{r}
+oil = data %>% filter(
+  geo == "Denmark" &
+    siec == "Gas oil and diesel oil" &
+    nrg_bal == "Gross inland deliveries - calculated"
+) %>%
+  dplyr::select(8, 9)
+
+colnames(oil) = c("time", "obs")
+oil$time = as.Date(paste(oil$time, "-01", sep =""))
+train = oil[1:180,]; test = oil[181:nrow(oil),]
+```
+
+Initial Plot
+- ACF shows a oscillatory pattern
+  - Clear strong seasonal pattern with prominent spikes every 12 lags
+- PACF shows large spike at lag 12, and gradually decays
+  - Suggests seasonal dependency, gradual decay supports an AR structure
+=> Indicates presence of seasonality, gradual decay suggesting seasonal AR
+SARIMA will be modelled
+```{r}
+
+plot(oil$time, oil$obs, type = "l", ylab ="Value", xlab="Time")
+
+
+acf(oil$obs, lag.max = 120, main = "", xaxt = "n")
+axis(1, at = seq(0, length(oil$obs), by = 12))
+
+
+pacf(oil$obs, lag.max = 120, main = "", xaxt = "n")
+axis(1, at = seq(0, length(oil$obs), by = 12))
+
+## for report
+par(mfrow=c(1,2))
+acf(oil$obs, lag.max = 60, main = "", xaxt = "n")
+axis(1, at = seq(0, length(oil$obs), by = 12))
+
+
+pacf(oil$obs, lag.max = 60, main = "", xaxt = "n")
+axis(1, at = seq(0, length(oil$obs), by = 12))
+```
+
+Exploratory analyses
+Decomposition
+- Panel 2 indicates presence of seasonality
+- Panel 3 indicates ambiguous trend
+
+```{r}
+#decomp on full
+oil_ts_f = ts(oil$obs, frequency = 12)
+decomp_f = stl(oil_ts_f, s.window = "periodic")
+plot(decomp_f)
+
+
+#decomp on training
+oil_ts = ts(train$obs, frequency = 12)
+decomp = stl(oil_ts, s.window = "periodic")
+plot(decomp)
+resid = decomp$time.series[, "remainder"]
+
+```
+
+Manually checking for trend
+- Expecting an eventual downward trend post-2013 due to change in regulation
+
+
+```{r}
+#estimating trend component
+decomp = decompose(oil_ts, type = "additive")
+rem_season = oil_ts - decomp$seasonal
+autoplot(rem_season)
+adf.test(rem_season) #stationary since pval<0.05, no differencing required..?
+
+#modelling trend using interaction since change in behaviour should be expected to be gradual
+train$policy = ifelse(train$time >= as.Date("2013-01-01"), 1, 0)
+time_index = 1:length(rem_season)
+mod_policy = lm(rem_season~time_index *policy, data = train)
+summary(mod_policy)
+checkresiduals(mod_policy)
+#acf results indicate some autocorrelation (lags ~8)
+#residual histogram close to normally distributed
+#can be improved by including lagged predictors
+
+ggplot(train, aes(x = time, y = obs)) +
+  geom_line() +
+  geom_line(aes(y = predict(mod_policy)), color = "red") +
+  geom_vline(xintercept = as.Date("2013-01-01"), linetype="dashed", color="blue") +
+  ggtitle("Trend Model with Policy Intervention")
+
+
+future_time_index = seq(max(time_index) + 1, max(time_index) + nrow(test))
+test$time_index = future_time_index
+test$policy = rep(1, nrow(test))
+future_trend = predict(mod_policy, newdata = test)
+
+test$future_trend = predict(mod_policy, newdata = test)
+
+# merge train and test data
+train$future_trend = NA  
+forecast_df = bind_rows(train, test)  # Combine both datasets
+
+# visualizing forecast
+ggplot(forecast_df, aes(x = time, y = obs)) +
+  geom_line() +
+  geom_line(aes(y = future_trend), color = "red") +
+  geom_vline(xintercept = as.Date("2013-01-01"), linetype = "dashed", color = "blue") +
+  ggtitle("Forecast Adjusted for Legislation Impact")
+
+
+```
+
+Modelling seasonality with dummy variables
+```{r, DV}
+train$month = factor(format(train$time, "%m"))
+mod_season_dummy = lm(obs ~ month, data = train)
+summary(mod_season_dummy)
+test$month = factor(format(test$time, "%m"), levels = levels(train$month))
+test$future_season = predict(mod_season_dummy, newdata = test)
+
+ggplot() +
+  geom_line(data = train, aes(x = time, y = obs), color = "black") +
+  geom_line(data = test, aes(x=time, y=obs), color = "black") +
+  geom_line(data = test, aes(x = time, y = future_season), color="red", linetype = "dashed") +
+  geom_line(data = train, aes(x = time, y=predict(mod_season_dummy, newdata = train)), color = "red") +
+  theme_minimal() +
+  ggtitle("Seasonal Model with Forecast")
+
+#checking residuals
+train$resid = residuals(mod_season_dummy)
+
+ggAcf(train$resid) + ggtitle("ACF") #lag 9 term
+ggPacf(train$resid) + ggtitle("PACF") 
+
+train$lag9 = lag(train$obs, 9)
+test$lag9 = lag(test$obs, 9)
+#adding lagged to seasonal
+mod_season_dummy_lag = lm(obs ~ month + lag9, data = train, na.action = na.omit)
+
+ggAcf(residuals(mod_season_dummy_lag)) #lag 8
+
+train$lag8 = lag(train$obs, 8)
+test$lag8 = lag(test$obs, 8)
+test$lag9[1:9] = train$obs[(nrow(train)-9): nrow(train)]
+test$lag8[1:8] = train$obs[(nrow(train)-8): nrow(train)]
+
+mod_season_dummy_lag_2 = lm(obs ~ month + lag9 + lag8, data = train, na.action = na.omit)
+
+ggAcf(residuals(mod_season_dummy_lag_2))
+adf.test(residuals(mod_season_dummy_lag_2))
+
+#for predicting 2025 values
+future_test = data.frame(
+  time = seq(max(test$time), by = "month", length.out=5)[-1],
+  month = factor(format((seq(max(test$time), by = "month", length.out=5)[-1]), "%m"), levels = levels(train$month))
+)
+future_test$lag9 = c(tail(test$obs,9)[1:4])
+future_test$lag8 = c(tail(test$obs,8)[1:4])
+
+future_test$pred = predict(mod_season_dummy_lag_2, newdata = future_test)
+
+
+ggplot() +
+  geom_line(data = train, aes(x = time, y = obs), color = "gray") +
+  geom_line(data = train, aes(x = time, y=predict(mod_season_dummy_lag_2, newdata = train)), color = "red") + 
+  geom_line(data = test, aes(x=time, y=obs), color = "gray") +
+  geom_line(data = test, aes(x = time, y = predict(mod_season_dummy_lag_2, newdata = test)), color="red", linetype = "dashed") +
+  geom_line(data = future_test, aes(x=time, y=pred), color = "blue", linetype = "dashed") +
+  theme_minimal() +
+  ggtitle("Seasonal Model with two lags")
+
+summary(mod_season_dummy_lag_2)
+AIC(mod_season_dummy_lag_2)
+resid_dv = residuals((mod_season_dummy_lag_2))
+ggAcf(resid_dv, lag.max = 120)
+ggPacf(resid_dv, lag.max = 120)
+adf.test(resid_dv)
+```
+
+
+auto.arima to ballpark
+```{r}
+
+mod_ballpark = auto.arima(rem_season)
+summary(mod_ballpark)
+
+best_arima = auto.arima(oil_ts)
+summary(best_arima)
+
+best_sarima = auto.arima(oil_ts, seasonal = TRUE)
+summary(best_sarima)
+```
+
+Box-Jenkins Breakdown
+1. Model Identification
+- Stationarity 
+- Order Selection
+
+2. Model Estimation
+- Differencing if required
+- Recheck ACF/PACF
+
+3. Fitting & Diagnostics
+- Ljung-Box, ACF and QQ on residuals
+
+4. Forecasting & Validation
+
+1. Model Identification
+```{r, modelIdentification}
+oil_ts = ts(train$obs, start = c(2008, 01),frequency = 12)
+autoplot(oil_ts) + ggtitle("Training set")
+ggAcf(oil_ts, lag.max = 120) + ggtitle("ACF")
+ggPacf(oil_ts, lag.max = 120) + ggtitle("PACF")
+adf.test(oil$obs, k = 5)
+adf.test(oil_ts, k = 5)
+```
+ACF & PACF graphs indicate strong seasonality that needs to be modelled
+- Seasonal terms in ACF has sinusoidal pattern - spikes at 12, 24 that gradually decays 
+- Annual seasonality
+- Short-term correlations
+=> Seasonal MA may be required
+
+- PACF spike at 12 and decays over time 
+=> Seasonal AR term may be required
+
+adf.test() indicates lag terms ~5
+=> No differencing required since stationary.
+
+2. Model Estimation
+```{r, modelEst}
+results = list()
+#range of values to check
+#p = 0:1; q = 0:1; 
+P_vals = 0:2; Q_vals = 0:2
+
+#for (p in p) {
+#  for (q in q) {
+for (P in P_vals) {
+  for (Q in Q_vals) {
+    model = paste0("SARIMA(0,0,0)(", P, ",0,", Q, ")[12]")
+    mod = tryCatch({
+      arima(
+        oil_ts,
+        order = c(0, 0, 0),
+        seasonal = list(order = c(P, 0, Q), period = 12)
+      )
+    }, error = function(e)
+      return(NULL))
+    
+    if (is.null(mod)) {
+      cat("Error", model, "skip")
+      next
+    }
+    
+    results[[model]] = list(
+      model = mod,
+      train_pred = fitted(mod),
+      test_pred = forecast(mod, h = nrow(test))$mean,
+      aic = mod$aic
+    )
+  }
+}
+#  }
+#}
+
+aic_vals = sapply(results, function(x) x$aic)
+aic_vals
+
+#selection between sarima(0,0,0)(1,0,0)[12] and sarima(0,0,0)(2,0,1)[12] based on aic, going with the simpler model since aic difference minute 
+
+chosen_sarima = results[["SARIMA(0,0,0)(1,0,0)[12]"]][["model"]]
+summary(chosen_sarima)
+
+alt_sarima = results[["SARIMA(0,0,0)(2,0,1)[12]"]][["model"]]
+summary(alt_sarima)
+#checking residuals
+resid_sarima = residuals(chosen_sarima)
+ggAcf(resid_sarima,lag.max = 120)
+ggPacf(resid_sarima, lag.max = 120)
+#no significant spikes
+```
+
+3. Fitting & Diagnostics
+```{r}
+ljungbox_12 = Box.test(resid_sarima, lag = 12, type = "Ljung-Box", fitdf = 1)
+
+ljungbox_24 = Box.test(resid_sarima, lag = 24, type = "Ljung-Box", fitdf = 1)
+
+ljungbox_12; ljungbox_24
+#ljung-box indicates residuals are white noise (pval > 0.05)
+```
+4. Forecasting & Validations
+
+```{r}
+forecast_sarima = forecast(chosen_sarima, h = nrow(test), level = c(90,95))
+test$pred_sarima = forecast_sarima$mean
+test$lower_95 = forecast_sarima$lower[,2]
+test$upper_95 = forecast_sarima$upper[,2]
+train$pred_sarima = fitted(chosen_sarima)
+
+ggplot() +
+  geom_line(data = train, aes(x = time, y = obs), color = "gray") +
+  geom_line(data = train, aes(x = time, y = pred_sarima), color = "red") +
+  geom_line(data = test, aes(x= time, y=obs), color = "gray") +
+  geom_line( data = test, aes(x=time, y=pred_sarima), color = "red", linetype = "dashed") + 
+  geom_ribbon(data = test, aes(x=time, ymin = lower_95, ymax = upper_95), fill = "red", alpha = 0.2) +
+  theme_minimal() +
+  ggtitle("SARIMA forecast with 95% CI")
+
+accuracy(forecast_sarima, test$obs) #look at percentage
+
+
+#forecasting dec'24 - mar'25
+forecast_extend = nrow(test) + 4
+forecast_sarima_ext = forecast(chosen_sarima, h = forecast_extend, level = c(90,95))
+forecast_dates = seq(max(test$time), by = "month", length.out = 5)[-1]
+
+#adjusting dataframes for presentation
+ext_test = data.frame(
+  time = forecast_dates,
+  pred_sarima = forecast_sarima_ext$mean[(nrow(test)+1):forecast_extend],
+  lower_95 = forecast_sarima_ext$lower[(nrow(test)+1): forecast_extend, 2],
+  upper_95 = forecast_sarima_ext$upper[(nrow(test)+1): forecast_extend, 2]
+)
+observed_data = oil %>%
+  filter(time >= "2022-01-01")
+
+connect = train %>%
+  filter(time ==max(time)) %>%
+  mutate(lower_95 = NA, upper_95= NA)
+forecast_combined = bind_rows(connect, test, ext_test)
+
+ggplot() +
+  geom_line(data = observed_data, aes(x=time, y=obs), color = "gray") +
+  geom_line(data = train[train$time >= as.Date("2022-01-01"),], aes(x=time, y=pred_sarima), color="red") +
+  geom_line(data = forecast_combined, aes(x=time, y=pred_sarima), color="red") +
+  geom_ribbon(data = forecast_combined, aes(x=time, ymin=lower_95, ymax=upper_95), fill="red", alpha=0.1) +
+  geom_line(data=forecast_combined[forecast_combined$time>=as.Date("2024-12-01"),], aes(x=time, y=pred_sarima), color="blue") +
+  geom_ribbon(data = forecast_combined[forecast_combined$time >= as.Date("2024-12-01"), ], aes(x=time, ymin=lower_95, ymax=upper_95), fill="blue", alpha=0.1) +
+  theme_minimal()+
+  ggtitle("Extended SARIMA Forecast with 95% CI")
+##heteroscedasticity
+plot(train$pred_sarima, residuals(chosen_sarima))
+qqnorm(residuals(chosen_sarima)) #appear normal, few outliers
+qqline(residuals(chosen_sarima))
+
+white.test(residuals(chosen_sarima)) #at 0.05 no evidence of heteroscedasticity -> CI estimates of forecast valid, GLS not required
+
+```
+
+
+```{r}
+
+##
+ggplot() +
+  geom_line(data = train[train$time >= as.Date("2022-01-01"),], aes(x = time, y = obs), color = "gray") +
+  geom_line(data = train[train$time >= as.Date("2022-01-01"),], aes(x = time, y = pred_sarima), color = "red") +
+  geom_line(data = forecast_combined, aes(x= time, y=obs), color = "gray") +
+  geom_line(data = forecast_combined, aes(x=time, y=pred_sarima), color = "red") + 
+  geom_ribbon(data = forecast_combined, aes(x=time, ymin = lower_95, ymax = upper_95), fill = "red", alpha = 0.2) +
+  geom_line(data = forecast_combined[forecast_combined$time >= as.Date("2024-12-01"),], aes(x=time, y=pred_sarima), color = "blue") +
+  geom_ribbon(data = forecast_combined[forecast_combined$time >= as.Date("2024-12-01"),], aes(x = time, ymin = ts(lower_95), ymax = upper_95), fill = "blue", alpha = 0.2) +
+  theme_minimal() +
+  ggtitle("Extended SARIMA forecast with 95% CI")
+
+##recheck forecast
+```
+
+```{r, test}
+ggplot() +
+  # observed data (gray)
+  geom_line(data = observed_data, aes(x = time, y = obs), color = "gray") +
+
+  # forecasted predictions (red)
+  geom_line(data = forecast_combined, aes(x = time, y = pred_sarima), color = "red") +
+
+  # unified forecast confidence interval (single ribbon)
+  geom_ribbon(data = forecast_combined, aes(x = time, ymin = lower_95, ymax = upper_95), 
+              fill = "gray", alpha = 0.2) +   # Match second image style
+
+  theme_minimal() +
+  ggtitle("Extended SARIMA Forecast with Unified 95% CI")
+```
+
+Tables and figures
+```{r}
+library(MLmetrics)
+library(knitr)
+library(kableExtra)
+#aic and mape comparison
+aic_values = c(
+  round(AIC(mod_season_dummy_lag_2),2),
+  round(AIC(chosen_sarima),2),
+  round(AIC(alt_sarima),2)
+)
+#rmse mae mape
+fcv = as.numeric(forecast(chosen_sarima, h=nrow(test))$mean)
+
+rmse_sar = round(sqrt(mean((fcv - test$obs)^2)),3)
+mae_sar = round(mean(abs(fcv - test$obs)),3)
+rmse_sar; mae_sar
+
+mape_values = c(
+  round(MAPE(predict(mod_season_dummy_lag_2, newdata = test), test$obs),2),
+  round(MAPE(forecast(chosen_sarima, h =nrow(test))$mean, test$obs),2),
+  round(MAPE(forecast(alt_sarima, h = nrow(test))$mean, test$obs),2)
+)
+
+model_names = c("DV+Lagged", "SAR(1)", "SARIMA(0,0,0)(2,0,1)[12]")
+
+comparison_table = data.frame(
+  Model = model_names,
+  AIC = aic_values,
+  MAPE = mape_values
+)
+comparison_table = comparison_table %>%
+  arrange(AIC)
+
+kable(comparison_table)
+
+#forecast graph
+
+
+ggplot() +
+  #observed
+  geom_line(data = train[train$time >= as.Date("2022-01-01"),], aes(x = time, y = obs, color = "Observed Data")) +
+    geom_line(data = forecast_combined, aes(x= time, y=obs, color = "Observed Data")) +
+  
+  #fitted
+  geom_line(data = train[train$time >= as.Date("2022-01-01"),], aes(x = time, y = pred_sarima, color = "Fitted Data")) +
+  geom_line(data = forecast_combined, aes(x=time, y=pred_sarima, color = "Fitted Data")) + 
+  geom_ribbon(data = forecast_combined, aes(x=time, ymin = lower_95, ymax = upper_95), fill = "red", alpha = 0.2) +
+  
+  #forecast
+  geom_line(data = forecast_combined[forecast_combined$time >= as.Date("2024-12-01"),], aes(x=time, y=pred_sarima, color = "Forecast")) +
+  geom_ribbon(data = forecast_combined[forecast_combined$time >= as.Date("2024-12-01"),], aes(x = time, ymin = ts(lower_95), ymax = upper_95), fill = "blue", alpha = 0.2) +
+  ggtitle("Extended SAR(1) Forecast with 95% CI") +
+  xlab("Time") +
+  ylab("Oil Units") +
+  scale_color_manual(
+    name = "Legend",
+    values = c("Observed Data" = "gray",
+               "Fitted Data" = "red",
+               "Forecast" = "blue")) +
+  theme(legend.position = c(0.1,0.93),
+        legend.key = element_rect(fill = "white"))
+
+
+#forecast table
+ext_test_kable = ext_test %>%
+  mutate(CI = paste0("(", round(lower_95,2), ", ", round(upper_95,2), ")")) %>% 
+  select(time, pred_sarima, CI)
+colnames(ext_test_kable) = c("Date", "Forecasted Value", "95% CI")
+
+fv_kable = ext_test_kable %>%
+  mutate(`Forecasted Value` = round(`Forecasted Value`, 2))
+
+#model assumptions and test results
+#stationarity, adf pval <0.05
+adf.test(residuals(chosen_sarima))
+#=> stationary
+#on residuals
+checkresiduals(chosen_sarima) 
+#residuals approximately normal, looks centered about 0
+
+Box.test(residuals(chosen_sarima), lag = 12, type = "Ljung-Box") #no serial ac, pval >0.05
+white.test(residuals(chosen_sarima))
+#homoscedastic, pval >0.05
+
+
+#=> residuals white noise, approximately 0 mean with constant variance
+
+summary(chosen_sarima)
+
+tsdiag(chosen_sarima)
+```
